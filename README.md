@@ -10,5 +10,6 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r __node:=teleo
 ```
 Run SLAM
 ```bash
+colcon build
 ros2 run rover_slam_python rover_slam
 ```

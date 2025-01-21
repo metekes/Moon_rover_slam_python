@@ -8,6 +8,7 @@ from message_filters import Subscriber, ApproximateTimeSynchronizer
 import sensor_msgs
 import struct
 import std_msgs
+from gazebo_msgs.msg import ModelStates
 import g2o
 
 class GraphSLAM(Node):
@@ -39,20 +40,22 @@ class GraphSLAM(Node):
         solver = g2o.BlockSolverSE3(g2o.LinearSolverEigenSE3())
         algorithm = g2o.OptimizationAlgorithmLevenberg(solver)
         self.optimizer_.set_algorithm(algorithm)
-        self.kernel_ = g2o.RobustKernelTukey()
-        self.kernel_.set_delta(2)
+        self.kernel_ = g2o.RobustKernelTukey() # decide which kernel to use and its threshold
+        self.kernel_.set_delta(5)
 
         # set topic names
         self.rgb_img_topic_   = "/depth_camera/image_raw"
         self.depth_img_topic_ = "/depth_camera/depth/image_raw"
         self.pointcloud_topic_ = "/depth_camera/points"
         self.imu_topic_ = "/imu_ros_plugin/out"
+        self.gt_topic_ = "/gazebo/model_states"
 
     def initSubcribes(self):
         depth_img_sub = Subscriber(self, sensor_msgs.msg.Image, self.depth_img_topic_)
         rgb_img_sub = Subscriber(self, sensor_msgs.msg.Image, self.rgb_img_topic_)
         pointcloud_sub = Subscriber(self, sensor_msgs.msg.PointCloud2, self.pointcloud_topic_)
-        self.create_subscription(sensor_msgs.msg.Imu, self.imu_topic_, self.decodeIMU, 10)
+        self.create_subscription(sensor_msgs.msg.Imu, self.imu_topic_, self.decodeIMU, 1)
+        self.create_subscription(ModelStates, self.gt_topic_, self.decodeGT, 1)
 
         sync = ApproximateTimeSynchronizer([rgb_img_sub, depth_img_sub, pointcloud_sub], queue_size=1, slop=0.05)
         sync.registerCallback(self.decodeImg)
@@ -66,6 +69,14 @@ class GraphSLAM(Node):
         self.angular_vel_ = imu_msg.angular_velocity
         # print(self.flag_img_available_)
         self.runSLAM()
+
+    def decodeGT(self, msg):
+        rover_index = msg.name.index('rover')
+        gt_rover_pose = msg.pose[rover_index]
+        position = gt_rover_pose.position
+        self.gt_rover_position_ = np.array([position.x, position.y, position.z])
+        orientation = gt_rover_pose.orientation
+        self.gt_rover_orientation_ = np.array([orientation.x, orientation.y, orientation.z, orientation.w])
 
     def decodeImg(self, rgb_img_msg, depth_img_msg, pointcloud_msg):
         if not rgb_img_msg.data or not depth_img_msg.data:
@@ -132,11 +143,13 @@ class GraphSLAM(Node):
             # print(self.prev_good_keypoints_[0].pt) # x,y pixel of the 1st keypoint location for prev
             # print(self.current_feature_coordinates_[0:2]) # coord of first 2 features of current
             # print(self.current_good_keypoints_[0].pt) # x,y pixel of the 1st keypoint location for current
+            self.runOdometry()
             self.runICP() # visiual-inertial odometry
 
             self.flag_img_available_   = False
-            self.prev_descriptors_ = self.current_descriptors_
+            # self.prev_descriptors_ = self.current_descriptors_
             self.prev_rgb_img_   = self.current_rgb_img_.copy()
+            self.prev_pointcloud_ = self.current_pointcloud_.copy()
             # self.prev_good_depths_ = self.current_good_depths_ ####################################
         
     def processInitialFrame(self):
@@ -205,15 +218,15 @@ class GraphSLAM(Node):
 
         if len(self.current_feature_coordinates_) > 0: self.flag_keypoint_coordinates_available_ = True
 
-        
+        """
         print(self.current_feature_coordinates_[:5])
         print("\n")
         print(self.prev_feature_coordinates_[:5])
         print("\n")
-        
+        """
 
-        # [x,y,z] = self.current_feature_coordinates_
-        # origin at the center, z outside the camera, x positive towards right (along width), y positive towards down (along height)
+        # [x,y,z] = self.current_feature_coordinates_ in the world frame not in camera
+        # for the camera frame: origin at the center, z outside the camera, x positive towards right (along width), y positive towards down (along height)
 
     def runICP(self):
         number_of_vertices = len(self.optimizer_.vertices())
@@ -245,7 +258,7 @@ class GraphSLAM(Node):
             print(self.prev_feature_coordinates_[:5])
             print(self.current_feature_coordinates_[:5])
         """
-        # add increamnetal poses
+        # add incremental poses
         if number_of_edges == 0:
             pose_1 = g2o.VertexSE3()
             pose_1.set_id(number_of_vertices)
@@ -256,6 +269,7 @@ class GraphSLAM(Node):
             pose_1 = self.optimizer_.vertex(self.last_node_id_)
         
         last_transformation_matrix = pose_1.estimate().matrix()
+
         pose_2 = g2o.VertexSE3()
         pose_2.set_id(number_of_vertices + 1)
         pose_2.set_estimate(g2o.Isometry3d(last_transformation_matrix))
@@ -309,9 +323,10 @@ class GraphSLAM(Node):
         optimized_pose2 = pose_2.estimate()
         optimized_pose1 = pose_1.estimate()
         print("Optimized Pose:")
-        print(optimized_pose1.translation())
-        print(optimized_pose2.translation())
-        print(optimized_pose2.matrix())
+        print(f"gt: {self.gt_rover_position_}")
+        print(f"estimated: {optimized_pose2.translation()}")
+        print(f"error: {self.gt_rover_position_ - optimized_pose2.translation()}")
+        # print(optimized_pose2.matrix())
         print("\n")
         ################################################################
 
