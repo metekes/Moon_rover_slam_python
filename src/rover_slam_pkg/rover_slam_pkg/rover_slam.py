@@ -10,6 +10,7 @@ import struct
 import std_msgs
 from gazebo_msgs.msg import ModelStates
 import g2o
+from .helper import *
 
 class GraphSLAM(Node):
 
@@ -24,16 +25,27 @@ class GraphSLAM(Node):
         self.flag_initial_img_available_ = False
         self.flag_img_available_ = False
         self.flag_keypoint_coordinates_available_ = False
+        self.flag_gt_available = False ########################################################### sil
+        self.flag_initial_imu_data_available_ = False
 
         # set params
-        self.feature_match_distance_threshold_ = 30
-        self.max_depth_measurable_ = 200 # should not be hard-coded
+        self.feature_match_distance_threshold_ = 20 # should be tuned
+        self.max_feature_3D_distance_ = 7 # should be tuned
+        self.num_closest_feature_cooridantes_ = 15 # should be tuned
+        self.max_depth_measurable_ = 200 # should be tuned
         self.img_width_ = 0
         self.img_height_ = 0
         self.transformation_from_camera_to_world_ = np.array([[ 0,  0, 1,   0],
                                                               [-1,  0, 0,   0],
                                                               [ 0, -1, 0, 1.7],
                                                               [ 0,  0, 0,   1]])
+        self.gravity_ = np.array([0, 0, -1.622]).reshape(3,1)
+        # self.matrix_A_ = np.array([]) # for filter implementation
+        # self.matrix_B_ = np.array([]) # for filter implementation
+        self.velocity_ = np.zeros((3,1))
+        self.position_ = np.zeros((3,1))
+        self.orientation_quat_= np.array([0, 0, 0, 1], dtype=float).reshape(4,1)
+        self.count_ = 0 ######################################################################################################################################## sil
 
         # set graph params
         self.optimizer_ = g2o.SparseOptimizer()
@@ -64,19 +76,31 @@ class GraphSLAM(Node):
         pass
     
     def decodeIMU(self, imu_msg):
-        self.linear_acc_ = imu_msg.linear_acceleration
-        self.orientation_quat_ = imu_msg.orientation
-        self.angular_vel_ = imu_msg.angular_velocity
+        linear_acc = imu_msg.linear_acceleration
+        self.current_linear_acc_ = np.array([linear_acc.x, linear_acc.y, linear_acc.z]).reshape(3,1)
+        angular_vel = imu_msg.angular_velocity
+        self.current_angular_vel_ = np.array([angular_vel.x, angular_vel.y, angular_vel.z]).reshape(3,1)
         # print(self.flag_img_available_)
+        self.current_imu_time_ = imu_msg.header.stamp.sec + imu_msg.header.stamp.nanosec * 10**-9
         self.runSLAM()
 
     def decodeGT(self, msg):
         rover_index = msg.name.index('rover')
+
         gt_rover_pose = msg.pose[rover_index]
-        position = gt_rover_pose.position
-        self.gt_rover_position_ = np.array([position.x, position.y, position.z])
-        orientation = gt_rover_pose.orientation
-        self.gt_rover_orientation_ = np.array([orientation.x, orientation.y, orientation.z, orientation.w])
+        self.gt_rover_position_ = np.array([gt_rover_pose.position.x, gt_rover_pose.position.y, gt_rover_pose.position.z])
+        self.gt_rover_orientation_ = np.array([gt_rover_pose.orientation.x, gt_rover_pose.orientation.y, gt_rover_pose.orientation.z, gt_rover_pose.orientation.w])
+
+        twist = msg.twist[rover_index]
+        self.gt_rover_vel_ = np.array([twist.linear.x, twist.linear.y, twist.linear.z]).reshape(3,1)
+
+        ####################################################################################
+        if not self.flag_gt_available:
+            self.flag_gt_available = True
+            self.velocity_ = self.gt_rover_vel_.copy()
+            self.position_ = self.gt_rover_position_.reshape(3,1).copy()
+            self.orientation_quat_= self.gt_rover_orientation_.reshape(4,1).copy()
+        ######################################################################################
 
     def decodeImg(self, rgb_img_msg, depth_img_msg, pointcloud_msg):
         if not rgb_img_msg.data or not depth_img_msg.data:
@@ -126,12 +150,18 @@ class GraphSLAM(Node):
         self.current_pointcloud_ = np.array([pointcloud_x, pointcloud_y, pointcloud_z])
 
     def runSLAM(self):
+        if not self.flag_gt_available: return
+        if (not self.flag_initial_imu_data_available_):
+            self.resetIMUData()
+            return
+        
         if (not self.flag_img_available_):
             self.runOdometry()
+            self.resetIMUData()
         
         else:
             if (not self.flag_initial_img_available_):
-                self.processInitialFrame()
+                self.resetImageData()
                 return
             
             self.extractFeatures()
@@ -139,24 +169,28 @@ class GraphSLAM(Node):
             if (not self.flag_matches_available_): return
             self.getFeatureCoordinatesIn3D()
             if (not self.flag_keypoint_coordinates_available_): return
-            # print(self.prev_feature_coordinates_[0:2]) # coord of first 2 features of prev
-            # print(self.prev_good_keypoints_[0].pt) # x,y pixel of the 1st keypoint location for prev
-            # print(self.current_feature_coordinates_[0:2]) # coord of first 2 features of current
-            # print(self.current_good_keypoints_[0].pt) # x,y pixel of the 1st keypoint location for current
+
             self.runOdometry()
             self.runICP() # visiual-inertial odometry
 
-            self.flag_img_available_   = False
+            self.resetImageData()
+            self.resetIMUData()
             # self.prev_descriptors_ = self.current_descriptors_
-            self.prev_rgb_img_   = self.current_rgb_img_.copy()
-            self.prev_pointcloud_ = self.current_pointcloud_.copy()
             # self.prev_good_depths_ = self.current_good_depths_ ####################################
-        
-    def processInitialFrame(self):
+    
+    def resetIMUData(self):
+        self.prev_angular_vel_ = self.current_angular_vel_.copy()
+        self.prev_linear_acc_ = self.current_linear_acc_.copy()
+        self.prev_imu_time_ = self.current_imu_time_
+        self.flag_initial_imu_data_available_ = True
+
+    def resetImageData(self):
         self.prev_rgb_img_   = self.current_rgb_img_.copy()
         self.prev_depth_img_ = self.current_depth_img_.copy()
         self.prev_pointcloud_ = self.current_pointcloud_.copy()
         self.flag_initial_img_available_ = True
+        self.flag_img_available_ = False
+        self.flag_keypoint_coordinates_available_ = False
 
     def extractFeatures(self):
         orb = cv.ORB_create()
@@ -206,16 +240,32 @@ class GraphSLAM(Node):
             position = self.transformation_from_camera_to_world_ @ np.vstack((position.reshape(3,1), np.array([1])))
             self.current_feature_coordinates_.append(position[:3])
 
-        """
+        # find features to seperate from eachtoher in 3D
         for ind in range(len(self.prev_feature_coordinates_)):
             dist = np.linalg.norm(self.prev_feature_coordinates_[ind] - self.current_feature_coordinates_[ind])
-            if dist >= 3: indices_to_remove.add(ind)
-        """
+            if dist >= self.max_feature_3D_distance_: indices_to_remove.add(ind)
         
+        # remove features further away from maximum measurable distance and the features two seperate from each other in 3D
         for ind in sorted(indices_to_remove, reverse=True):
             del self.prev_feature_coordinates_[ind]
             del self.current_feature_coordinates_[ind]
 
+        # select only the features with smallest difference between 3D coordiantes
+        if (len(self.current_feature_coordinates_)) > self.num_closest_feature_cooridantes_:
+            # Calculate norms for each pair of features
+            norms = [
+                (i, np.linalg.norm(self.prev_feature_coordinates_[i] - self.current_feature_coordinates_[i]))
+                for i in range(len(self.prev_feature_coordinates_))
+            ]
+
+            # Sort by norm value and select the indices of the smallest 5
+            smallest_indices = [i for i, _ in sorted(norms, key=lambda x: x[1])[:self.num_closest_feature_cooridantes_]]
+
+            # Filter the coordinates based on the smallest indices
+            self.prev_feature_coordinates_ = [self.prev_feature_coordinates_[i] for i in smallest_indices]
+            self.current_feature_coordinates_ = [self.current_feature_coordinates_[i] for i in smallest_indices]
+
+        # check if feature coordinates available
         if len(self.current_feature_coordinates_) > 0: self.flag_keypoint_coordinates_available_ = True
 
         """
@@ -229,6 +279,7 @@ class GraphSLAM(Node):
         # for the camera frame: origin at the center, z outside the camera, x positive towards right (along width), y positive towards down (along height)
 
     def runICP(self):
+        return
         number_of_vertices = len(self.optimizer_.vertices())
         number_of_edges = len(self.optimizer_.edges())
         
@@ -262,7 +313,7 @@ class GraphSLAM(Node):
         if number_of_edges == 0:
             pose_1 = g2o.VertexSE3()
             pose_1.set_id(number_of_vertices)
-            pose_1.set_estimate(g2o.Isometry3d(np.eye(4)))
+            pose_1.set_estimate(g2o.Isometry3d(quaternion2rotation_matrix(self.gt_rover_orientation_.reshape(4,1)).transpose(), self.gt_rover_position_))
             self.optimizer_.add_vertex(pose_1)
         
         else:
@@ -318,46 +369,72 @@ class GraphSLAM(Node):
         # Optimize
         self.optimizer_.initialize_optimization()
         # self.optimizer_.set_verbose(True)
-        self.optimizer_.optimize(10)
+        self.optimizer_.optimize(20)
 
         optimized_pose2 = pose_2.estimate()
-        optimized_pose1 = pose_1.estimate()
         print("Optimized Pose:")
         print(f"gt: {self.gt_rover_position_}")
         print(f"estimated: {optimized_pose2.translation()}")
         print(f"error: {self.gt_rover_position_ - optimized_pose2.translation()}")
         # print(optimized_pose2.matrix())
         print("\n")
-        ################################################################
-
     
     def runOdometry(self):
+        self.count_ += 1 ############################################ sil
+        if not self.flag_gt_available: return
+        dt = self.current_imu_time_ - self.prev_imu_time_
+        linear_acc = (self.prev_linear_acc_ + self.current_linear_acc_) / 2
+        angular_vel = (self.prev_angular_vel_ + self.current_angular_vel_) / 2
+
+        acc_inertial = (quaternion2rotation_matrix(self.orientation_quat_).transpose() @ linear_acc + self.gravity_)
+
+        self.position_ += self.velocity_ * dt + 0.5 * acc_inertial * dt**2
+
+        self.velocity_ += acc_inertial * dt
+
+        self.orientation_quat_ += quaternion_derivative(angular_vel, self.orientation_quat_) * dt
+        self.orientation_quat_ = self.orientation_quat_ / np.linalg.norm(self.orientation_quat_)
+
+        """
+        ##########################################################################################
+        if self.count_ % 100 == 0:
+            # print(acc_inertial)
+            print(f"gt: {self.gt_rover_position_}")
+            print(f"estimated: {self.position_}")
+            print(f"error: {self.gt_rover_position_.reshape(3,1) - self.position_}")
+            # print(optimized_pose2.matrix())
+            print("\n")
+        return
+        ###########################################################################################
         """
         number_of_vertices = len(self.optimizer_.vertices())
         number_of_edges = len(self.optimizer_.edges())
 
-        # add increamnetal poses
+        # add incremental poses
         if number_of_edges == 0:
             pose_1 = g2o.VertexSE3()
             pose_1.set_id(number_of_vertices)
             pose_1.set_estimate(g2o.Isometry3d(np.eye(4)))
+            pose_1.set_fixed(True)
             self.optimizer_.add_vertex(pose_1)
         
         else:
             pose_1 = self.optimizer_.vertex(self.last_node_id_)
         
-        last_transformation_matrix = pose_1.estimate().matrix()
         pose_2 = g2o.VertexSE3()
         pose_2.set_id(number_of_vertices + 1)
-        pose_2.set_estimate(g2o.Isometry3d(last_transformation_matrix))
+        pose_2.set_estimate(g2o.Isometry3d(quaternion2rotation_matrix(self.orientation_quat_).transpose(), self.position_))
         self.optimizer_.add_vertex(pose_2)
         self.last_node_id_ = number_of_vertices + 1
+
+        transformation_pose2_to_pose1 = np.linalg.inv(pose_1.estimate().matrix()) @ pose_2.estimate().matrix()
 
         edge = g2o.EdgeSE3()
         edge.set_id(number_of_edges)
         edge.set_vertex(0, pose_1)
         edge.set_vertex(1, pose_2)
-        edge.set_measurement(g2o.Isometry3d(np.eye(3), lm))
+        edge.set_measurement(g2o.Isometry3d(transformation_pose2_to_pose1))
+        info_matrix = np.eye(6)
         edge.set_information(info_matrix)
         edge.set_robust_kernel(self.kernel_)
         self.optimizer_.add_edge(edge)
@@ -367,15 +444,15 @@ class GraphSLAM(Node):
         # self.optimizer_.set_verbose(True)
         self.optimizer_.optimize(10)
 
-        optimized_pose2 = pose_2.estimate()
-        optimized_pose1 = pose_1.estimate()
-        print("Optimized Pose:")
-        print(optimized_pose1.translation())
-        print(optimized_pose2.translation())
-        print(optimized_pose2.matrix())
-        print("\n")
-        """
-        pass
+        if self.count_ % 100 == 0:
+            optimized_pose2 = pose_2.estimate()
+            print("Optimized Pose:")
+            print(f"gt: {self.gt_rover_position_}")
+            print(f"estimated: {optimized_pose2.translation()}")
+            print(f"error: {self.gt_rover_position_ - optimized_pose2.translation()}")
+            # print(optimized_pose2.matrix())
+            print("\n")
+        
 
 def main(args=None):
     rclpy.init(args=args)

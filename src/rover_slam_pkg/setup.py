@@ -15,7 +15,8 @@ setup(
         'setuptools',
         'numpy'
         'opencv-python',
-        'g2o'],
+        'g2o',
+        'helper'],
     zip_safe=True,
     maintainer='mete',
     maintainer_email='metekesici@gmail.com',
