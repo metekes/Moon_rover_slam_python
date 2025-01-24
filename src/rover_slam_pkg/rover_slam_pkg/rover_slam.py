@@ -1,7 +1,5 @@
 import rclpy
 from rclpy.node import Node
-import cv2 as cv
-import numpy as np
 from cv_bridge import CvBridge
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 
@@ -9,7 +7,11 @@ import sensor_msgs
 import struct
 import std_msgs
 from gazebo_msgs.msg import ModelStates
+
 import g2o
+import cv2 as cv
+import numpy as np
+
 from .helper import *
 from .customVertexSE3 import *
 
@@ -46,7 +48,7 @@ class GraphSLAM(Node):
         # self.matrix_B_ = np.array([]) # for filter implementation
         self.velocity_ = np.zeros((3,1))
         self.position_ = np.zeros((3,1))
-        self.orientation_quat_= np.array([0, 0, 0, 1], dtype=float).reshape(4,1)
+        self.orientation_quat_= np.array([0, 0, 0, 1], dtype=float).reshape(4,1) # from origin to rover, transpose of pose.estimate().matrix()[:3,:3]
         self.count_ = 0 ######################################################################################################################################## sil
 
         # set graph params
@@ -64,6 +66,10 @@ class GraphSLAM(Node):
         self.pointcloud_topic_ = "/depth_camera/points"
         self.imu_topic_ = "/imu_ros_plugin/out"
         self.gt_topic_ = "/gazebo/model_states"
+
+        # store gt and est positions to plot them later
+        self.file_ = open("positions.txt", "w")
+        self.file_.write("GT_x, GT_y, GT_z, Est_x, Est_y, Est_z\n")
 
     def initSubcribes(self):
         depth_img_sub = Subscriber(self, sensor_msgs.msg.Image, self.depth_img_topic_)
@@ -154,7 +160,7 @@ class GraphSLAM(Node):
         self.current_pointcloud_ = np.array([pointcloud_x, pointcloud_y, pointcloud_z])
 
     def runSLAM(self):
-        # self.flag_imu_data_available_ = True # to run ICP only
+        # self.flag_imu_data_available_ = False # to run ICP only
         if not self.flag_gt_available: return
         if (not self.flag_initial_imu_data_available_):
             self.resetIMUData()
@@ -379,13 +385,19 @@ class GraphSLAM(Node):
         self.optimizer_.initialize_optimization()
         # self.optimizer_.set_verbose(True)
         self.optimizer_.optimize(20)
+        pose_1.set_fixed((True))
+        pose_2.set_fixed((True))
 
+        # store optimized poses
         optimized_pose2 = pose_2.estimate()
+        self.file_.write(f"{self.gt_rover_position_[0]}, {self.gt_rover_position_[1]}, {self.gt_rover_position_[2]}, {optimized_pose2.translation()[0]}, {optimized_pose2.translation()[1]}, {optimized_pose2.translation()[2]}\n")
+
         print("Optimized Pose:")
         print("ICP")
         print(f"gt: {self.gt_rover_position_}")
         print(f"estimated: {optimized_pose2.translation()}")
         print(f"error: {self.gt_rover_position_ - optimized_pose2.translation()}")
+        print(f"error:\n {quaternion2rotation_matrix(self.gt_rover_orientation_.reshape(4,1)) @ optimized_pose2.matrix()[:3,:3]}")
         # print(optimized_pose2.matrix())
         print("\n")
     
@@ -488,14 +500,20 @@ class GraphSLAM(Node):
         self.optimizer_.initialize_optimization()
         # self.optimizer_.set_verbose(True)
         self.optimizer_.optimize(10)
+        pose_1.set_fixed((True))
+        pose_2.set_fixed((True))
 
-        if self.count_ % 100 == 0:
-            optimized_pose2 = pose_2.estimate()
+        # store poses
+        optimized_pose2 = pose_2.estimate()
+        self.file_.write(f"{self.gt_rover_position_[0]}, {self.gt_rover_position_[1]}, {self.gt_rover_position_[2]}, {optimized_pose2.translation()[0]}, {optimized_pose2.translation()[1]}, {optimized_pose2.translation()[2]}\n")
+
+        if self.count_ % 10 == 0:
             print("Optimized Pose:")
             print("IMU")
             print(f"gt: {self.gt_rover_position_}")
             print(f"estimated: {optimized_pose2.translation()}")
             print(f"error: {self.gt_rover_position_ - optimized_pose2.translation()}")
+            print(f"error:\n {quaternion2rotation_matrix(self.gt_rover_orientation_.reshape(4,1)) @ optimized_pose2.matrix()[:3,:3]}")
             # print(optimized_pose2.matrix())
             print("\n")
         
