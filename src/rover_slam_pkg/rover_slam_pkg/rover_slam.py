@@ -34,6 +34,9 @@ class GraphSLAM(Node):
         self.flag_gt_available = False ########################################################### sil
 
         # set params
+        self.cam_intrinsic_param_ = np.array([[391.64, 0,      240.5],
+                                              [0,      391.64, 180.5],
+                                              [0,      0,      1]])
         self.frame_count_from_keyframe_ = 0
         self.keyframe_list_ = []
         self.feature_match_distance_threshold_ = 30 # should be tuned
@@ -43,8 +46,8 @@ class GraphSLAM(Node):
         self.img_width_ = 0
         self.img_height_ = 0
         self.transformation_correction_camera_tilt_ = np.array([[ 1,  0, 0, 0],
-                                                                [ 0,  np.cos(0), np.sin(0), 0],
-                                                                [ 0, -np.sin(0), np.cos(0), 0],
+                                                                [ 0,  np.cos(0.4), np.sin(0.4), 0],
+                                                                [ 0, -np.sin(0.4), np.cos(0.4), 0],
                                                                 [ 0,  0, 0, 1]])
         
         self.transformation_from_camera_to_world_ = self.transformation_correction_camera_tilt_ @ np.array([[ 0,  0, 1,   0.215],
@@ -132,7 +135,7 @@ class GraphSLAM(Node):
             # convert img msgs to np instances
             bridge = CvBridge()
             self.current_rgb_img_   = bridge.imgmsg_to_cv2(rgb_img_msg, 'bgr8')
-            self.current_depth_img_ = bridge.imgmsg_to_cv2(depth_img_msg, '32FC1')
+            self.current_depth_img_ = bridge.imgmsg_to_cv2(depth_img_msg, desired_encoding='passthrough')
             self.current_depth_img_ = np.nan_to_num(self.current_depth_img_, nan=0.0, posinf=0.0, neginf=0.0)
             self.flag_img_available_ = True
             self.img_height_ = np.shape(self.current_rgb_img_)[0]
@@ -140,7 +143,7 @@ class GraphSLAM(Node):
             self.current_img_time_ = rgb_img_msg.header.stamp.sec + rgb_img_msg.header.stamp.nanosec * 10**-9
             path = "/home/mete/rover_slam_python/photos/" + str(self.count_) + ".jpg" 
             cv.imwrite(path, self.current_rgb_img_)
-            self.decodePointCloud(pointcloud_msg)
+            # self.decodePointCloud(pointcloud_msg)
             self.frame_count_from_keyframe_ += 1
 
             """
@@ -153,9 +156,9 @@ class GraphSLAM(Node):
             cv.imshow("depth", depth_img_normalized)
             cv.waitKey(1)
             """
-            
 
     def decodePointCloud(self, pointcloud_msg):
+        ###### bu fonkisyonu sil
         point_step = pointcloud_msg.point_step
         data = pointcloud_msg.data
         num_points = len(data) // point_step
@@ -176,6 +179,7 @@ class GraphSLAM(Node):
         pointcloud_x = (np.array(pointcloud_x)).reshape(self.img_height_, self.img_width_)
         pointcloud_y = (np.array(pointcloud_y)).reshape(self.img_height_, self.img_width_)
         pointcloud_z = (np.array(pointcloud_z)).reshape(self.img_height_, self.img_width_)
+        pointcloud_z = np.nan_to_num(pointcloud_z, nan=0.0, posinf=0.0, neginf=0.0)
         self.current_pointcloud_ = np.array([pointcloud_x, pointcloud_y, pointcloud_z])
 
     def runSLAM(self):
@@ -237,7 +241,7 @@ class GraphSLAM(Node):
     def resetImgData(self):
         self.prev_rgb_img_   = self.current_rgb_img_.copy()
         self.prev_depth_img_ = self.current_depth_img_.copy()
-        self.prev_pointcloud_ = self.current_pointcloud_.copy()
+        # self.prev_pointcloud_ = self.current_pointcloud_.copy()
         self.prev_img_time_= self.current_img_time_
         self.flag_initial_img_available_ = True
         self.flag_img_available_ = False
@@ -275,11 +279,11 @@ class GraphSLAM(Node):
         """
 
     def keyframeSelection(self):
-        if self.frame_count_from_keyframe_ == 20: 
-            self.keyframe_list_.append(self.current_good_keypoints_.copy())
+        if self.frame_count_from_keyframe_ >= 20 and self.current_descriptors_ is not None:
+            self.keyframe_list_.append(self.current_descriptors_.copy())
             self.frame_count_from_keyframe_ = 0
         
-        elif len(self.keyframe_list_) != 0:
+        elif len(self.keyframe_list_) != 0 and self.current_descriptors_ is not None:
             bf = cv.BFMatcher(cv.NORM_HAMMING, crossCheck=True)
             matches = bf.match(self.keyframe_list_[-1], self.current_descriptors_)
             good_matches = [m for m in matches if m.distance < self.feature_match_distance_threshold_]
@@ -294,19 +298,21 @@ class GraphSLAM(Node):
 
         for ind, keypoint in enumerate(self.prev_good_keypoints_):
             x,y = keypoint.pt
-            position = self.prev_pointcloud_[:,int(y),int(x)]
+            if self.prev_depth_img_[int(y),int(x)] == 0: indices_to_remove.add(ind)
+            position = (np.linalg.inv(self.cam_intrinsic_param_) @ np.array([x, y, 1])) * self.prev_depth_img_[int(y),int(x)]
             if position[-1] >= self.max_depth_measurable_: indices_to_remove.add(ind)
             position = self.transformation_from_camera_to_world_ @ np.vstack((position.reshape(3,1), np.array([1])))
             self.prev_feature_coordinates_.append(position[:3])
 
         for ind, keypoint in enumerate(self.current_good_keypoints_):
             x,y = keypoint.pt
-            position = self.current_pointcloud_[:,int(y),int(x)]
+            if self.current_depth_img_[int(y),int(x)] == 0: indices_to_remove.add(ind)
+            position = (np.linalg.inv(self.cam_intrinsic_param_) @ np.array([x, y, 1])) * self.current_depth_img_[int(y),int(x)]
             if position[-1] >= self.max_depth_measurable_: indices_to_remove.add(ind)
             position = self.transformation_from_camera_to_world_ @ np.vstack((position.reshape(3,1), np.array([1])))
             self.current_feature_coordinates_.append(position[:3])
 
-        # find features to seperate from eachtoher in 3D
+        # find features to seperate from each other in 3D
         for ind in range(len(self.prev_feature_coordinates_)):
             dist = np.linalg.norm(self.prev_feature_coordinates_[ind] - self.current_feature_coordinates_[ind])
             if dist >= self.max_feature_3D_distance_: indices_to_remove.add(ind)
@@ -332,7 +338,7 @@ class GraphSLAM(Node):
             self.current_feature_coordinates_ = [self.current_feature_coordinates_[i] for i in smallest_indices]
 
         # check if feature coordinates available
-        if len(self.current_feature_coordinates_) > 2: self.flag_keypoint_coordinates_available_ = True
+        if len(self.current_feature_coordinates_) > 5: self.flag_keypoint_coordinates_available_ = True
 
         """
         print(self.current_feature_coordinates_[:5])
