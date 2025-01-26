@@ -2,6 +2,7 @@ import rclpy
 from rclpy.node import Node
 from cv_bridge import CvBridge
 from message_filters import Subscriber, ApproximateTimeSynchronizer
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 import sensor_msgs
 import struct
@@ -33,17 +34,24 @@ class GraphSLAM(Node):
         self.flag_gt_available = False ########################################################### sil
 
         # set params
-        self.feature_match_distance_threshold_ = 20 # should be tuned
+        self.frame_count_from_keyframe_ = 0
+        self.keyframe_list_ = []
+        self.feature_match_distance_threshold_ = 30 # should be tuned
         self.max_feature_3D_distance_ = 7 # should be tuned
         self.num_closest_feature_cooridantes_ = 15 # should be tuned
-        self.max_depth_measurable_ = 200 # should be tuned
+        self.max_depth_measurable_ = 8 # should be tuned
         self.img_width_ = 0
         self.img_height_ = 0
-        self.transformation_from_camera_to_world_ = np.array([[ 0,  0, 1,   0],
-                                                              [-1,  0, 0,   0],
-                                                              [ 0, -1, 0, 1.7],
-                                                              [ 0,  0, 0,   1]])
-        self.gravity_ = np.array([0, 0, -1.622]).reshape(3,1)
+        self.transformation_correction_camera_tilt_ = np.array([[ 1,  0, 0, 0],
+                                                                [ 0,  np.cos(0), np.sin(0), 0],
+                                                                [ 0, -np.sin(0), np.cos(0), 0],
+                                                                [ 0,  0, 0, 1]])
+        
+        self.transformation_from_camera_to_world_ = self.transformation_correction_camera_tilt_ @ np.array([[ 0,  0, 1,   0.215],
+                                                                                                            [-1,  0, 0,   0],
+                                                                                                            [ 0, -1, 0, 0.065],
+                                                                                                            [ 0,  0, 0,   1]])
+        self.gravity_ = np.array([0, 0, -1.62]).reshape(3,1)
         # self.matrix_A_ = np.array([]) # for filter implementation
         # self.matrix_B_ = np.array([]) # for filter implementation
         self.velocity_ = np.zeros((3,1))
@@ -61,22 +69,27 @@ class GraphSLAM(Node):
         self.rover_vertex_ids_ = set()
 
         # set topic names
-        self.rgb_img_topic_   = "/depth_camera/image_raw"
-        self.depth_img_topic_ = "/depth_camera/depth/image_raw"
-        self.pointcloud_topic_ = "/depth_camera/points"
-        self.imu_topic_ = "/imu_ros_plugin/out"
-        self.gt_topic_ = "/gazebo/model_states"
+        self.rgb_img_topic_   = "/camera/image_raw"
+        self.depth_img_topic_ = "/camera/depth/image_raw"
+        self.pointcloud_topic_ = "/camera/points"
+        self.imu_topic_ = "/imu"
+        self.gt_topic_ = "/model_states"
 
         # store gt and est positions to plot them later
         self.file_ = open("positions.txt", "w")
         self.file_.write("GT_x, GT_y, GT_z, Est_x, Est_y, Est_z\n")
 
     def initSubcribes(self):
-        depth_img_sub = Subscriber(self, sensor_msgs.msg.Image, self.depth_img_topic_)
-        rgb_img_sub = Subscriber(self, sensor_msgs.msg.Image, self.rgb_img_topic_)
-        pointcloud_sub = Subscriber(self, sensor_msgs.msg.PointCloud2, self.pointcloud_topic_)
-        self.create_subscription(sensor_msgs.msg.Imu, self.imu_topic_, self.decodeIMU, 1)
-        self.create_subscription(ModelStates, self.gt_topic_, self.decodeGT, 1)
+        qos_profile = QoSProfile(
+            depth=10, 
+            reliability=ReliabilityPolicy.BEST_EFFORT
+        )
+
+        depth_img_sub = Subscriber(self, sensor_msgs.msg.Image, self.depth_img_topic_, qos_profile=qos_profile)
+        rgb_img_sub = Subscriber(self, sensor_msgs.msg.Image, self.rgb_img_topic_, qos_profile=qos_profile)
+        pointcloud_sub = Subscriber(self, sensor_msgs.msg.PointCloud2, self.pointcloud_topic_, qos_profile=qos_profile)
+        self.create_subscription(sensor_msgs.msg.Imu, self.imu_topic_, self.decodeIMU, qos_profile=qos_profile)
+        self.create_subscription(ModelStates, self.gt_topic_, self.decodeGT, qos_profile=qos_profile)
 
         sync = ApproximateTimeSynchronizer([rgb_img_sub, depth_img_sub, pointcloud_sub], queue_size=1, slop=0.05)
         sync.registerCallback(self.decodeImg)
@@ -120,21 +133,27 @@ class GraphSLAM(Node):
             bridge = CvBridge()
             self.current_rgb_img_   = bridge.imgmsg_to_cv2(rgb_img_msg, 'bgr8')
             self.current_depth_img_ = bridge.imgmsg_to_cv2(depth_img_msg, '32FC1')
+            self.current_depth_img_ = np.nan_to_num(self.current_depth_img_, nan=0.0, posinf=0.0, neginf=0.0)
             self.flag_img_available_ = True
             self.img_height_ = np.shape(self.current_rgb_img_)[0]
             self.img_width_ = np.shape(self.current_rgb_img_)[1]
             self.current_img_time_ = rgb_img_msg.header.stamp.sec + rgb_img_msg.header.stamp.nanosec * 10**-9
+            path = "/home/mete/rover_slam_python/photos/" + str(self.count_) + ".jpg" 
+            cv.imwrite(path, self.current_rgb_img_)
             self.decodePointCloud(pointcloud_msg)
+            self.frame_count_from_keyframe_ += 1
 
-            '''
+            """
             # TO VISUALIZE THE IMGS
             print(self.current_rgb_img_.shape)
             cv.imshow("rgb", self.current_rgb_img_)
+            self.current_depth_img_ = np.nan_to_num(self.current_depth_img_, nan=0.0, posinf=0.0, neginf=0.0)
             depth_img_normalized = cv.normalize(self.current_depth_img_, None, 0, 255, cv.NORM_MINMAX)
             depth_img_normalized = depth_img_normalized.astype(np.uint8)
             cv.imshow("depth", depth_img_normalized)
             cv.waitKey(1)
-            '''
+            """
+            
 
     def decodePointCloud(self, pointcloud_msg):
         point_step = pointcloud_msg.point_step
@@ -171,6 +190,9 @@ class GraphSLAM(Node):
 
         elif ((not self.flag_imu_data_available_) and self.flag_img_available_):
             if (not self.flag_initial_img_available_):
+                orb = cv.ORB_create()
+                _, kf_descriptors = orb.detectAndCompute(cv.cvtColor(self.current_rgb_img_, cv.COLOR_BGR2GRAY), None)
+                self.keyframe_list_.append(kf_descriptors.copy())
                 self.resetImgData()
                 return
             
@@ -184,7 +206,13 @@ class GraphSLAM(Node):
             self.resetImgData()
         
         elif (self.flag_imu_data_available_ and self.flag_img_available_):
+            self.runOdometry()
+            self.resetIMUData()
+
             if (not self.flag_initial_img_available_):
+                orb = cv.ORB_create()
+                _, kf_descriptors = orb.detectAndCompute(cv.cvtColor(self.current_rgb_img_, cv.COLOR_BGR2GRAY), None)
+                self.keyframe_list_.append(kf_descriptors.copy())
                 self.resetImgData()
                 return
             self.extractFeatures()
@@ -193,11 +221,9 @@ class GraphSLAM(Node):
             self.getFeatureCoordinatesIn3D()
             if (not self.flag_keypoint_coordinates_available_): return
 
-            self.runOdometry()
             self.runICP() # visiual-inertial odometry
 
             self.resetImgData()
-            self.resetIMUData()
             # self.prev_descriptors_ = self.current_descriptors_
             # self.prev_good_depths_ = self.current_good_depths_ ####################################
     
@@ -238,13 +264,28 @@ class GraphSLAM(Node):
         for match in good_matches:
             self.prev_good_keypoints_.append(self.prev_keypoints_[match.queryIdx])
             self.current_good_keypoints_.append(self.current_keypoints_[match.trainIdx])
+        
+        self.keyframeSelection()
 
-        '''
+        """
         # TO VISUALIZE ALL THE MATCHING FEAUTRES NOT ONLY THE GOOD ONES
         img_match = cv.drawMatches(self.prev_rgb_img_, self.prev_keypoints_, self.current_rgb_img_, self.current_keypoints_, matches, None)
         cv.imshow("All Matches", img_match)
         cv.waitKey(1)
-        '''
+        """
+
+    def keyframeSelection(self):
+        if self.frame_count_from_keyframe_ == 20: 
+            self.keyframe_list_.append(self.current_good_keypoints_.copy())
+            self.frame_count_from_keyframe_ = 0
+        
+        elif len(self.keyframe_list_) != 0:
+            bf = cv.BFMatcher(cv.NORM_HAMMING, crossCheck=True)
+            matches = bf.match(self.keyframe_list_[-1], self.current_descriptors_)
+            good_matches = [m for m in matches if m.distance < self.feature_match_distance_threshold_]
+            if len(good_matches) < 0.9 * len(self.current_descriptors_):
+                self.keyframe_list_.append(self.current_descriptors_.copy())
+                self.frame_count_from_keyframe_ = 0
 
     def getFeatureCoordinatesIn3D(self):
         self.prev_feature_coordinates_ = []
@@ -291,7 +332,7 @@ class GraphSLAM(Node):
             self.current_feature_coordinates_ = [self.current_feature_coordinates_[i] for i in smallest_indices]
 
         # check if feature coordinates available
-        if len(self.current_feature_coordinates_) > 0: self.flag_keypoint_coordinates_available_ = True
+        if len(self.current_feature_coordinates_) > 2: self.flag_keypoint_coordinates_available_ = True
 
         """
         print(self.current_feature_coordinates_[:5])
@@ -450,7 +491,7 @@ class GraphSLAM(Node):
             if time_diff < closest_time_diff:
                 closest_pose_2 = vertex
                 closest_time_diff = time_diff
-
+        
         return closest_pose_1, closest_pose_2
     
     def runOdometry(self):
@@ -507,7 +548,7 @@ class GraphSLAM(Node):
         optimized_pose2 = pose_2.estimate()
         self.file_.write(f"{self.gt_rover_position_[0]}, {self.gt_rover_position_[1]}, {self.gt_rover_position_[2]}, {optimized_pose2.translation()[0]}, {optimized_pose2.translation()[1]}, {optimized_pose2.translation()[2]}\n")
 
-        if self.count_ % 10 == 0:
+        if self.count_ % 20 == 0:
             print("Optimized Pose:")
             print("IMU")
             print(f"gt: {self.gt_rover_position_}")
