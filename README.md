@@ -1,4 +1,4 @@
-# Moon Rover Cooperative Visual SLAM ## Commands
+# Moon Rover Cooperative Visual SLAM
 ## Commands:
 Launch the sim
 ```bash
@@ -13,6 +13,7 @@ Run the dataset (example path: /home/mete/dataset_rosbags/tum_rgbd/fr1_xyz/fr1_x
 ```bash
 ros2 bag play {path}
 ```
+To use the dataset instead of the sim use dataset_slam branch
 
 Run SLAM
 ```bash
