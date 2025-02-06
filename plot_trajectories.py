@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import argparse
 
 # Function to read the file and plot the data
 def read_and_plot(file_path):
@@ -49,5 +50,9 @@ def read_and_plot(file_path):
     # Show the plot
     plt.show()
 
-# Call the function
-read_and_plot("positions.txt")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Plot 3D trajectories from a file.")
+    parser.add_argument("file_path", type=str, help="Path to the input file containing the trajectories.")
+    args = parser.parse_args()
+    
+    read_and_plot(args.file_path)

@@ -82,7 +82,6 @@ class GraphSLAM(Node):
         # set topic names
         self.rgb_img_topic_   = "/camera/image_raw"
         self.depth_img_topic_ = "/camera/depth/image_raw"
-        self.pointcloud_topic_ = "/camera/points"
         self.imu_topic_ = "/imu"
         self.gt_topic_ = "/model_states"
 
@@ -98,11 +97,10 @@ class GraphSLAM(Node):
 
         depth_img_sub = Subscriber(self, sensor_msgs.msg.Image, self.depth_img_topic_, qos_profile=qos_profile)
         rgb_img_sub = Subscriber(self, sensor_msgs.msg.Image, self.rgb_img_topic_, qos_profile=qos_profile)
-        pointcloud_sub = Subscriber(self, sensor_msgs.msg.PointCloud2, self.pointcloud_topic_, qos_profile=qos_profile)
         self.create_subscription(sensor_msgs.msg.Imu, self.imu_topic_, self.decodeIMU, qos_profile=qos_profile)
         self.create_subscription(ModelStates, self.gt_topic_, self.decodeGT, qos_profile=qos_profile)
 
-        sync = ApproximateTimeSynchronizer([rgb_img_sub, depth_img_sub, pointcloud_sub], queue_size=1, slop=0.05)
+        sync = ApproximateTimeSynchronizer([rgb_img_sub, depth_img_sub], queue_size=1, slop=0.05)
         sync.registerCallback(self.decodeImg)
 
     def initPublishers(self):
@@ -135,7 +133,7 @@ class GraphSLAM(Node):
             self.orientation_quat_= self.gt_rover_orientation_.reshape(4,1).copy()
         ######################################################################################
 
-    def decodeImg(self, rgb_img_msg, depth_img_msg, pointcloud_msg):
+    def decodeImg(self, rgb_img_msg, depth_img_msg):
         if not rgb_img_msg.data or not depth_img_msg.data:
             self.flag_img_available_ = False
 
@@ -154,8 +152,6 @@ class GraphSLAM(Node):
             # self.decodePointCloud(pointcloud_msg)
             self.frame_count_from_keyframe_ += 1
 
-            cv.imshow("rgb", self.current_rgb_img_)
-            cv.waitKey(1)
             """
             # TO VISUALIZE THE IMGS
             print(self.current_rgb_img_.shape)
@@ -167,33 +163,8 @@ class GraphSLAM(Node):
             cv.waitKey(1)
             """
 
-    def decodePointCloud(self, pointcloud_msg):
-        ###### bu fonkisyonu sil
-        point_step = pointcloud_msg.point_step
-        data = pointcloud_msg.data
-        num_points = len(data) // point_step
-        pointcloud_x = []
-        pointcloud_y = []
-        pointcloud_z = []
-
-        for i in range(num_points):
-            start = i * point_step
-            # Decode x, y, z using the offsets
-            x = struct.unpack_from('f', data, start + 0)[0]
-            y = struct.unpack_from('f', data, start + 4)[0]
-            z = struct.unpack_from('f', data, start + 8)[0]
-            pointcloud_x.append(x)
-            pointcloud_y.append(y)
-            pointcloud_z.append(z)
-
-        pointcloud_x = (np.array(pointcloud_x)).reshape(self.img_height_, self.img_width_)
-        pointcloud_y = (np.array(pointcloud_y)).reshape(self.img_height_, self.img_width_)
-        pointcloud_z = (np.array(pointcloud_z)).reshape(self.img_height_, self.img_width_)
-        pointcloud_z = np.nan_to_num(pointcloud_z, nan=0.0, posinf=0.0, neginf=0.0)
-        self.current_pointcloud_ = np.array([pointcloud_x, pointcloud_y, pointcloud_z])
-
     def runSLAM(self):
-        # self.flag_imu_data_available_ = False # to run ICP only
+        self.flag_imu_data_available_ = False # to run ICP only
         if not self.flag_gt_available: return
         if (not self.flag_initial_imu_data_available_):
             self.resetIMUData()
@@ -394,13 +365,6 @@ class GraphSLAM(Node):
 
         # check if feature coordinates available
         if len(self.current_feature_coordinates_) > 5: self.flag_keypoint_coordinates_available_ = True
-
-        """
-        print(self.current_feature_coordinates_[:5])
-        print("\n")
-        print(self.prev_feature_coordinates_[:5])
-        print("\n")
-        """
 
         # [x,y,z] = self.current_feature_coordinates_ in the world frame not in camera
         # for the camera frame: origin at the center, z outside the camera, x positive towards right (along width), y positive towards down (along height)
@@ -615,6 +579,7 @@ class GraphSLAM(Node):
         self.orientation_quat_ = self.orientation_quat_ / np.linalg.norm(self.orientation_quat_)
     
     def detectLoopClosure(self):
+        return
         current_frame_histogram = self.createBoWHistogram(self.current_descriptors_.copy())
         # Apply TF-IDF transformation
         current_frame_tfidf = self.tfidf_transformer_.transform(current_frame_histogram.reshape(1, -1)).toarray()

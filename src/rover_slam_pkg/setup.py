@@ -25,7 +25,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'rover_slam = rover_slam_pkg.rover_slam:main'
+            'rover_slam = rover_slam_pkg.rover_slam:main',
+            'rover_direct_slam = rover_slam_pkg.rover_direct_slam:main'
         ],
     },
 )
